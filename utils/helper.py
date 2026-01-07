@@ -12,8 +12,8 @@ import uuid
 import time
 from functools import wraps
 import logging
-#from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_deepseek import ChatDeepSeek
+from langchain_google_genai import ChatGoogleGenerativeAI
+#from langchain_deepseek import ChatDeepSeek
 
 logger = logging.getLogger(__name__)
 
@@ -24,16 +24,16 @@ ai_api_key = os.getenv("DEEPSEEK_API_KEY")
 sessions: Dict[str, Dict[str, Any]] = {}
 session_lock = Lock()
 
-"""LLM = ChatGoogleGenerativeAI(
+LLM = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     # api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.4
-)"""
-LLM = ChatDeepSeek(
+)
+"""LLM = ChatDeepSeek(
         model="deepseek-chat",
         api_key=ai_api_key,
         temperature=0.6,
-    )
+    )"""
 def time_logger(func):
     """A decorator that logs the execution time of a synchronous function."""
     @wraps(func)

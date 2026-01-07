@@ -2,7 +2,7 @@
 
 import logging
 import json
-from langchain.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END
 from utils.prompts import (
     summary_prompt,

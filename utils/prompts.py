@@ -1,4 +1,4 @@
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 summary_prompt = PromptTemplate(
     input_variables=["parsed_data", "user_feedback"],
