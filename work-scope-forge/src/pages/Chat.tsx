@@ -262,18 +262,25 @@ const MessageContent = ({ content }: { content: string }) => {
         if (data.confirmation_message && data.updated_component) return <FinalAdjustment data={data} />;
 
         // Scope of Work detection (now more flexible)
-        if (data.overview && (data.feature_breakdown || data.development_estimation || data.effort_estimation_table)) {
+        if (data.overview && (data.feature_breakdown || data.development_estimation || data.effort_estimation_table || data.milestone_plan)) {
             return <ScopeOfWork data={data} />;
         }
-
-        // Tech Stack
-        if (data.frontend && data.backend) return <TechStack data={data} />;
 
         // Features
         if (data.features && Array.isArray(data.features)) return <FeatureList data={data} />;
 
-        // Summary / Overview
-        if (data.summary || data.overview) return <Summary data={{ summary: data.summary || data.overview, follow_up_question: data.follow_up_question }} />;
+        // Summary / Overview (simple text response)
+        if (data.summary || (data.overview && !data.feature_breakdown && !data.milestone_plan)) {
+            return <Summary data={{ summary: data.summary || data.overview, follow_up_question: data.follow_up_question }} />;
+        }
+
+        // Dynamic Tech Stack Detection:
+        // A tech stack is an object where most keys (excluding follow_up_question) have array values.
+        const keys = Object.keys(data).filter(k => k !== 'follow_up_question');
+        const arrayValueCount = keys.filter(k => Array.isArray(data[k])).length;
+        if (keys.length > 0 && arrayValueCount / keys.length >= 0.5) {
+            return <TechStack data={data} />;
+        }
 
         // Fallback for objects that don't match known structures
         return (
