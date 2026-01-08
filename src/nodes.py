@@ -1,159 +1,129 @@
 
-
 import logging
 import json
-from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END
 from utils.prompts import (
-    summary_prompt,
     overview_prompt,
     feature_suggestion_prompt,
     tech_stack_prompt,
     work_scope_prompt,
-    router_prompt,
-    final_adjustment_prompt,  
+    modify_scope_prompt,
 )
-from utils.helper import time_logger
+from utils.helper import gemini_client
+from google.genai import types
 import re
 
 logger = logging.getLogger(__name__)
 
-
-@time_logger
 def load_initial_state_node(state):
     logger.info("Loading initial state.")
     return state
 
 
-@time_logger
-def generate_initial_summary_node(state):
-    user_feedback = getattr(state, 'user_feedback', "")
-    try:
-        prompt = ChatPromptTemplate.from_template(summary_prompt.template)
-        chain = prompt | state.LLM
-        output = chain.invoke({"parsed_data": state.file_content, "user_feedback": user_feedback})
-
-        raw = output.content.strip()
-        logger.info(f"Raw LLM output for initial summary: {raw}")
-        
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
-            logger.info(f"Parsed initial summary result: {result}")
-            follow_up = result.get("follow_up_question", "") 
-            logger.info(f"Follow-up question for initial summary: {follow_up}")
-            return {
-                "initial_summary": result.get("summary", "Error: No summary found in response."),
-                "follow_up_questions": str(follow_up).strip(),  
-                "current_stage": "initial_summary",
-                "user_feedback": ""
-            }
-        except json.JSONDecodeError:
-            logger.warning(f"Initial summary output not JSON:\n{raw}")
-            return {
-                "initial_summary": raw.strip(),
-                "follow_up_questions": "",
-                "current_stage": "initial_summary",
-                "user_feedback": ""
-            }
-
-    except Exception as e:
-        logger.error(f"Initial summary generation error: {e}", exc_info=True)
-        return {
-            "initial_summary": f"Error: {str(e)}",
-            "current_stage": "initial_summary",
-            "follow_up_questions": ""
-        }
-    
-@time_logger
 def router_node(state):
+    """
+    Routes to next stage, storing user input as preferences.
+    All user feedback is accumulated and applied in the final scope of work.
+    """
     user_input = getattr(state, 'user_input', "").strip()
-    current_stage = getattr(state, 'current_stage', 'initial_summary')
+    current_stage = getattr(state, 'current_stage', 'overview')
+    existing_preferences = getattr(state, 'user_preferences', "")
     
     state_updates = {"user_input": "", "user_feedback": "", "routing_decision": None}
 
     if not user_input:
-        return {**state_updates, "routing_decision": "PAUSE", "current_stage": current_stage}
+        # No input, just proceed to next stage
+        return {**state_updates, "routing_decision": "PROCEED", "current_stage": current_stage}
 
+    # Store user input as a preference for this stage
+    stage_prefix = f"[{current_stage.upper()}]"
+    new_preference = f"{stage_prefix} {user_input}"
+    if existing_preferences:
+        updated_preferences = f"{existing_preferences}\n{new_preference}"
+    else:
+        updated_preferences = new_preference
+    
+    logger.info(f"Router: Stored preference for {current_stage}: {user_input}")
+    logger.info(f"Router: All preferences so far:\n{updated_preferences}")
+    
+    return {
+        **state_updates,
+        "routing_decision": "PROCEED",
+        "user_feedback": user_input,
+        "user_preferences": updated_preferences,
+        "current_stage": current_stage
+    }
+
+
+def _call_gemini(prompt_text: str, gemini_file=None, temperature: float = 0.4) -> str:
+    """Helper function to call Gemini API with optional file."""
+    contents = []
+    
+    if gemini_file is not None:
+        contents.append(gemini_file)
+    
+    contents.append(prompt_text)
+    
+    response = gemini_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(
+            temperature=temperature
+        )
+    )
+    return response.text.strip()
+
+
+def _parse_json_response(raw: str) -> dict | None:
+    """Parse JSON from LLM response, handling markdown code blocks."""
+    if raw.startswith("```json") or raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    
     try:
-        prompt = ChatPromptTemplate.from_template(router_prompt.template)
-        chain = prompt | state.LLM
-        
-        output = chain.invoke({
-            "user_input": user_input,
-            "current_stage": current_stage
-        })
-
-        raw_output = output.content.strip()
-        logger.info(f"Router raw output:\n{raw_output}")
-
-        action = ""
-        for line in raw_output.splitlines():
-            if line.upper().startswith("ACTION:"):
-                action = line.split(":", 1)[1].strip().upper()
-                break 
-
-        if action not in {"APPROVE", "EDIT"}:
-            logger.warning(f"Router failed to produce valid action. Defaulting to EDIT. Output: {raw_output}")
-            action = "EDIT"
-        final_feedback = user_input if action == "EDIT" else ""
-        logger.info(f"Router decision: {action}, Feedback: '{final_feedback}'")
-
-        return {
-            **state_updates,
-            "routing_decision": action,
-            "user_feedback": final_feedback,
-            "current_stage": current_stage
-        }
-
-    except Exception as e:
-        logger.error(f"Router error: {e}", exc_info=True)
-        return {
-            **state_updates,
-            "routing_decision": "EDIT",
-            "user_feedback": user_input,
-            "current_stage": current_stage
-        }
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
-@time_logger
 def generate_overview_node(state):
+    """
+    Generate overview using Gemini with the uploaded file directly.
+    On first call, sends file + prompt. File is provided via gemini_file in state.
+    """
     user_feedback = getattr(state, 'user_feedback', "")
+    gemini_file = getattr(state, 'gemini_file', None)  # Direct file object passed from main.py
+    file_content = getattr(state, 'file_content', "")
+    
     try:
-        prompt = ChatPromptTemplate.from_template(overview_prompt.template)
-        chain = prompt | state.LLM
-        output = chain.invoke({
-            "parsed_data": state.file_content,
-            "approved_summary": state.initial_summary,
-            "user_feedback": user_feedback
-        })
-
-        raw = output.content.strip()
+        # Build the prompt text
+        prompt_text = overview_prompt.template.format(
+            parsed_data=file_content if file_content else "[See attached document]",
+            user_feedback=user_feedback
+        )
+        
+        # Call Gemini with file (on first call) or without
+        raw = _call_gemini(prompt_text, gemini_file=gemini_file)
         logger.info(f"Raw LLM output for overview: {raw}")
         
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
+        result = _parse_json_response(raw)
+        if result:
             logger.info(f"Parsed overview result: {result}")
             follow_up = result.get("follow_up_question", "")  
-            logger.info(f"Follow-up question for overview: {follow_up}")
             return {
                 "overview": result.get("overview", "Error: No overview found in response."),
                 "follow_up_questions": str(follow_up).strip(),  
                 "current_stage": "overview",
-                "user_feedback": ""
+                "user_feedback": "",
+                "gemini_file": None
             }
-        except json.JSONDecodeError:
+        else:
             logger.warning(f"Overview output not JSON:\n{raw}")
             return {
-                "overview": raw.strip(),
+                "overview": raw,
                 "follow_up_questions": "",
                 "current_stage": "overview",
-                "user_feedback": ""
+                "user_feedback": "",
+                "gemini_file": None
             }
 
     except Exception as e:
@@ -161,36 +131,29 @@ def generate_overview_node(state):
         return {
             "overview": f"Error: {str(e)}",
             "current_stage": "overview",
-            "follow_up_questions": ""
+            "follow_up_questions": "",
+            "gemini_file": None
         }
 
 
-@time_logger
 def feature_extraction_node(state):
     user_feedback = getattr(state, 'user_feedback', "")
     try:
-        prompt = ChatPromptTemplate.from_template(feature_suggestion_prompt.template)
-        chain = prompt | state.LLM
-        output = chain.invoke({
-            "parsed_data": state.file_content,
-            "approved_summary": state.overview,
-            "user_feedback": user_feedback
-        })
+        prompt_text = feature_suggestion_prompt.template.format(
+            parsed_data=state.file_content if state.file_content else "[See attached document]",
+            approved_overview=state.overview,
+            user_feedback=user_feedback
+        )
 
-        raw = output.content.strip()
+        raw = _call_gemini(prompt_text)
         logger.info(f"Raw LLM output for features: {raw}")
         
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
+        result = _parse_json_response(raw)
+        if result:
             logger.info(f"Parsed feature result: {result}")
             
             features = result.get("features", [])
             follow_up = result.get("follow_up_question", "")  
-            
-            logger.info(f"Follow-up questions for features: {follow_up}")
 
             if isinstance(features, list):
                 features_str = "\n".join(f"- {f.strip()}" for f in features)
@@ -203,8 +166,7 @@ def feature_extraction_node(state):
                 "current_stage": "features",
                 "user_feedback": ""
             }
-
-        except json.JSONDecodeError:
+        else:
             logger.warning(f"Feature extraction output not JSON:\n{raw}")
             return {
                 "extracted_features": raw,
@@ -222,34 +184,26 @@ def feature_extraction_node(state):
             "user_feedback": ""
         }
 
-@time_logger
+
 def generate_tech_stack_node(state):
     user_feedback = getattr(state, 'user_feedback', "")
     try:
-        prompt = ChatPromptTemplate.from_template(tech_stack_prompt.template)
-        chain = prompt | state.LLM
+        prompt_text = tech_stack_prompt.template.format(
+            parsed_data=state.file_content if state.file_content else "[See attached document]",
+            approved_overview=state.overview,
+            approved_features=state.extracted_features,
+            user_feedback=user_feedback
+        )
 
-        output = chain.invoke({
-            "parsed_data": state.file_content,
-            "approved_summary": state.overview,
-            "approved_features": state.extracted_features,
-            "user_feedback": user_feedback
-        })
-
-        raw = output.content.strip()
+        raw = _call_gemini(prompt_text)
         logger.info(f"Raw LLM output for tech stack: {raw}")
 
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
+        result = _parse_json_response(raw)
+        if result:
             logger.info(f"Parsed tech stack result: {result}")
 
             tech_stack_dict = result.get("tech_stack", {})
             follow_up_questions = result.get("follow_up_question", "")  
-            
-            logger.info(f"Follow-up questions for tech stack: {follow_up_questions}")
 
             return {
                 "tech_stack": json.dumps(tech_stack_dict, indent=2),
@@ -257,8 +211,7 @@ def generate_tech_stack_node(state):
                 "current_stage": "tech_stack",
                 "user_feedback": ""
             }
-
-        except json.JSONDecodeError:
+        else:
             logger.warning("Tech stack output not JSON:\n%s", raw)
             return {
                 "tech_stack": raw,
@@ -277,45 +230,49 @@ def generate_tech_stack_node(state):
         }
     
 
-@time_logger
 def generate_scope_of_work_node(state):
+    """
+    Generates the final scope of work, incorporating:
+    - All approved content (overview, features, tech_stack)
+    - All accumulated user_preferences from previous stages
+    - developer_profile for estimation hours
+    """
     user_feedback = getattr(state, 'user_feedback', "")
+    developer_profile = getattr(state, 'developer_profile', "")
+    user_preferences = getattr(state, 'user_preferences', "")
+    
     try:
-        prompt = ChatPromptTemplate.from_template(work_scope_prompt.template)
-        chain = prompt | state.LLM
-        
         try:
             tech_stack_for_prompt = json.loads(state.tech_stack)
         except (json.JSONDecodeError, TypeError):
             tech_stack_for_prompt = state.tech_stack
 
-        output = chain.invoke({
-            "parsed_data": state.file_content,
-            "approved_summary": state.overview,
-            "approved_features": state.extracted_features,
-            "approved_tech_stack": tech_stack_for_prompt,
-            "user_feedback": user_feedback
-        })
+        prompt_text = work_scope_prompt.template.format(
+            parsed_data=state.file_content if state.file_content else "[See attached document]",
+            approved_overview=state.overview,
+            approved_features=state.extracted_features,
+            approved_tech_stack=tech_stack_for_prompt,
+            user_feedback=user_feedback,
+            developer_profile=developer_profile,
+            user_preferences=user_preferences
+        )
 
-        raw = output.content.strip()
+        raw = _call_gemini(prompt_text)
         logger.info(f"Raw LLM output for scope of work: {raw}")
 
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
+        result = _parse_json_response(raw)
+        if result:
             logger.info(f"Parsed scope of work result: {result}")
             follow_up = result.get("follow_up_question", "")
             
             return {
                 "scope_of_work": json.dumps(result, indent=2),
+                "full_scope": json.dumps(result, indent=2),
                 "follow_up_questions": str(follow_up).strip(),
                 "current_stage": "scope_of_work",
                 "user_feedback": ""
             }
-
-        except json.JSONDecodeError:
+        else:
             logger.warning(f"Scope of work output not JSON:\n{raw}")
             return {
                 "scope_of_work": raw,
@@ -333,115 +290,92 @@ def generate_scope_of_work_node(state):
             "user_feedback": ""
         }
 
-@time_logger
-def handle_final_adjustments_node(state):
+
+def modify_scope_node(state):
     """
-    Handles final, small adjustments to the scope of work without regenerating the whole document.
+    Modifies a specific section of the scope of work based on user feedback.
     """
     user_feedback = getattr(state, 'user_feedback', "")
-    scope_of_work = getattr(state, 'scope_of_work', "")
-
-    logger.info("Handling final adjustments based on user feedback.")
-
-    if not user_feedback:
-        return {
-            "final_adjustment_response": "No feedback provided for adjustment.",
-            "current_stage": "final_review",
-            "follow_up_questions": "Is there anything else you'd like to change?"
-        }
-
-    try:
-        prompt = ChatPromptTemplate.from_template(final_adjustment_prompt.template)
-        chain = prompt | state.LLM
+    existing_scope = getattr(state, 'full_scope', "")
+    developer_profile = getattr(state, 'developer_profile', "")
+    
+    if not user_feedback or not existing_scope:
+        existing_scope = getattr(state, 'scope_of_work', "")
         
-        output = chain.invoke({
-            "scope_of_work": scope_of_work,
-            "user_feedback": user_feedback
-        })
+    if not user_feedback or not existing_scope:
+        logger.warning("modify_scope_node called without feedback or existing scope")
+        return {"current_stage": "scope_of_work"}
+    
+    try:
+        prompt_text = modify_scope_prompt.template.format(
+            existing_scope=existing_scope,
+            user_modification_request=user_feedback,
+            developer_profile=developer_profile
+        )
 
-        raw = output.content.strip()
-        logger.info(f"Raw LLM output for final adjustment: {raw}")
+        raw = _call_gemini(prompt_text)
+        logger.info(f"Raw LLM output for scope modification: {raw}")
 
-        if raw.startswith("```json") or raw.startswith("```"):
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-
-        try:
-            result = json.loads(raw)
-            logger.info(f"Parsed final adjustment result: {result}")
-            follow_up = result.pop("follow_up_question", "Does that look correct? Any other adjustments?")
+        result = _parse_json_response(raw)
+        if result and "updated_full_scope" in result and "ui_update" in result:
+            logger.info(f"Parsed modified scope result with partial UI update")
             
-            adjustment_response = json.dumps(result, indent=2)
+            full_scope = result.get("updated_full_scope")
+            ui_update = result.get("ui_update")
+            follow_up = ui_update.get("follow_up_questions") or ui_update.get("follow_up_question")
             
-            logger.info(f"Storing main content for final adjustment: {adjustment_response}")
-            logger.info(f"Storing new follow-up question: {follow_up}")
-
             return {
-                "final_adjustment_response": adjustment_response,
-                "current_stage": "final_review",
-                "user_feedback": "",
-                "follow_up_questions": str(follow_up).strip() 
+                "scope_of_work": json.dumps(ui_update, indent=2),
+                "full_scope": json.dumps(full_scope, indent=2),
+                "follow_up_questions": str(follow_up).strip(),
+                "current_stage": "scope_of_work",
+                "user_feedback": ""
             }
-
-        except json.JSONDecodeError:
-            logger.warning(f"Final adjustment output not JSON, treating as raw text:\n{raw}")
+        else:
+            logger.warning(f"Modified scope output not in expected dual format:\n{raw}")
+            if result:
+                return {
+                    "scope_of_work": json.dumps(result, indent=2),
+                    "full_scope": json.dumps(result, indent=2),
+                    "current_stage": "scope_of_work",
+                    "user_feedback": ""
+                }
             return {
-                "final_adjustment_response": raw,
-                "current_stage": "final_review",
-                "user_feedback": "",
-                "follow_up_questions": "Does that look correct? Any other adjustments?"
+                "scope_of_work": raw,
+                "follow_up_questions": "I've made the changes. Let me know if you need anything else!",
+                "current_stage": "scope_of_work",
+                "user_feedback": ""
             }
 
     except Exception as e:
-        logger.error(f"Final adjustment generation error: {e}", exc_info=True)
+        logger.error(f"Scope modification error: {e}", exc_info=True)
         return {
-            "final_adjustment_response": f"Error making adjustment: {str(e)}",
-            "current_stage": "final_review",
-            "follow_up_questions": "Sorry, I ran into an error. Could you rephrase your request?"
+            "follow_up_questions": f"Sorry, I encountered an error while modifying the scope: {str(e)}",
+            "current_stage": "scope_of_work",
+            "user_feedback": ""
         }
-    
-@time_logger
-def regenerate_current(state):
-    current_stage = getattr(state, 'current_stage', 'initial_summary')
-    stage_map = {
-        "initial_summary": generate_initial_summary_node,
-        "overview": generate_overview_node,
-        "features": feature_extraction_node,
-        "tech_stack": generate_tech_stack_node,
-        "scope_of_work": generate_scope_of_work_node
-    }
-    handler = stage_map.get(current_stage)
-    logger.info(f"Regenerating stage '{current_stage}' with feedback.")
-    return handler(state) if handler else state
 
 
-@time_logger
-def pause_node(state):
-    current_stage = getattr(state, 'current_stage', 'initial_summary')
-    logger.info(f"Paused at stage {current_stage}")
-    return state
-
-
-@time_logger
 def should_continue_from_router(state):
+    """
+    Routes to the next stage in the pipeline.
+    After scope_of_work is generated, routes to modify_scope for any user feedback.
+    """
     decision = getattr(state, 'routing_decision', None)
-    stage = getattr(state, 'current_stage', 'initial_summary')
+    stage = getattr(state, 'current_stage', 'overview')
+    user_feedback = getattr(state, 'user_feedback', "")
     
-    if decision == "EDIT":
-        if stage == "scope_of_work" or stage == "final_review":
-            return "handle_final_adjustments"
-        return "regenerate_current"
-        
-    elif decision == "APPROVE":
-        if stage == "final_review":
+    stage_transitions = {
+        "overview": "feature_extraction",
+        "features": "generate_tech_stack",
+        "tech_stack": "generate_scope_of_work",
+        "scope_of_work": "modify_scope"
+    }
+    
+    if decision == "PROCEED":
+        next_node = stage_transitions.get(stage, END)
+        if stage == "scope_of_work" and not user_feedback:
             return END
-
-        stage_transitions = {
-            "initial_summary": "generate_overview",
-            "overview": "feature_extraction",
-            "features": "generate_tech_stack",
-            "tech_stack": "generate_scope_of_work",
-            "scope_of_work": END
-        }
-        return stage_transitions.get(stage, "pause_node")
+        return next_node
     
-    return "pause_node"
+    return END

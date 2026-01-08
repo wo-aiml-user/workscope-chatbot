@@ -1,88 +1,61 @@
 
-from langchain_community.document_loaders.blob_loaders import Blob
 from typing import List, Dict, Any
 import os
 import tempfile
 from dotenv import load_dotenv
-from typing import List
-from llama_index.core import Document as LlamaDocument
-from llama_parse import LlamaParse
 from threading import Lock
 import uuid
 import time
 from functools import wraps
 import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
-#from langchain_deepseek import ChatDeepSeek
+from google import genai
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-ai_api_key = os.getenv("DEEPSEEK_API_KEY")
 
+def async_time_logger(func):
+    """Async decorator for logging function execution time."""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = await func(*args, **kwargs)
+        elapsed = time.time() - start_time
+        logger.info(f"{func.__name__} executed in {elapsed:.3f}s")
+        return result
+    return wrapper
+
+load_dotenv()
+
+# Initialize Gemini client for file uploads
+gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 sessions: Dict[str, Dict[str, Any]] = {}
 session_lock = Lock()
 
 LLM = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
-    # api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.4
 )
-"""LLM = ChatDeepSeek(
-        model="deepseek-chat",
-        api_key=ai_api_key,
-        temperature=0.6,
-    )"""
-def time_logger(func):
-    """A decorator that logs the execution time of a synchronous function."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        func_name = func.__name__
-        logger.info(f"ENTERING: {func_name}")
-        
-        result = func(*args, **kwargs)
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        logger.info(f"EXITING: {func_name} | DURATION: {duration:.4f} seconds")
-        return result
-    return wrapper
 
 
-def async_time_logger(func):
-    """A decorator that logs the execution time of an asynchronous function."""
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        start_time = time.time()
-        func_name = func.__name__
-        logger.info(f"ENTERING ASYNC: {func_name}")
-
-        result = await func(*args, **kwargs)
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        logger.info(f"EXITING ASYNC: {func_name} | DURATION: {duration:.4f} seconds")
-        return result
-    return wrapper
-
-
-def parse_file(file_bytes: bytes, filename: str) -> str:
-    api_key = os.getenv("PARSE_KEY")
-    if not api_key:
-        raise EnvironmentError("PARSE_KEY not found")
-    
+def upload_file_to_gemini(file_bytes: bytes, filename: str) -> str:
+    """
+    Upload a file to Gemini's File API and return the file URI.
+    The file can then be used directly in prompts.
+    """
     tmp_path = None
     try:
+        # Save to temp file for upload
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
         
-        parser = LlamaParse(api_key=api_key, result_type="text")
-        documents: List[LlamaDocument] = parser.load_data([tmp_path])
+        # Upload to Gemini
+        uploaded_file = gemini_client.files.upload(file=tmp_path)
+        logger.info(f"File uploaded to Gemini: {uploaded_file.name}")
         
-        return "\n\n".join(doc.text for doc in documents)
+        return uploaded_file.name  # Return the file reference name
     
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -113,15 +86,13 @@ def update_session(session_id: str, updates: Dict[str, Any]):
 def get_stage_content(state_values: Dict[str, Any], current_stage: str) -> Dict[str, Any]:
     """Extract content and follow-up questions separately."""
     stage_content_map = {
-        "initial_summary": "initial_summary",
         "overview": "overview",
         "features": "extracted_features",
         "tech_stack": "tech_stack",
-        "scope_of_work": "scope_of_work",
-        "final_review": "final_adjustment_response" 
+        "scope_of_work": "scope_of_work"
     }
     
-    content_key = stage_content_map.get(current_stage, "initial_summary")
+    content_key = stage_content_map.get(current_stage, "overview")
     main_content = state_values.get(content_key, f"Error: No content generated for stage {current_stage}")
     follow_up = state_values.get("follow_up_questions", "")
     

@@ -7,9 +7,10 @@ export interface ApiResponse {
 }
 
 // POST /sessions/{session_id}/upload
-export const uploadFile = async (sessionId: string, file: File): Promise<ApiResponse> => {
+export const uploadFile = async (sessionId: string, file: File, developerProfile: string = ""): Promise<ApiResponse> => {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("developer_profile", developerProfile);
 
   const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/upload`, {
     method: "POST",
@@ -27,11 +28,11 @@ export const uploadFile = async (sessionId: string, file: File): Promise<ApiResp
 };
 
 // POST /sessions/{session_id}/initial-input
-export const sendInitialInput = async (sessionId: string, input: string): Promise<ApiResponse> => {
+export const sendInitialInput = async (sessionId: string, input: string, developerProfile: string = ""): Promise<ApiResponse> => {
   const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/initial-input`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initial_input: input }),
+    body: JSON.stringify({ initial_input: input, developer_profile: developerProfile }),
   });
 
   if (!response.ok) {
@@ -50,6 +51,24 @@ export const sendInput = async (sessionId: string, input: string): Promise<ApiRe
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user_input: input }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({
+      detail: `Request failed with status: ${response.status}`,
+    }));
+    throw new Error(error.detail);
+  }
+
+  return await response.json();
+};
+
+// POST /sessions/{session_id}/developer-profile
+export const updateDeveloperProfile = async (sessionId: string, developerProfile: string): Promise<{ status: string; message: string }> => {
+  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/developer-profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ developer_profile: developerProfile }),
   });
 
   if (!response.ok) {

@@ -46,7 +46,7 @@ const Index = () => {
       const sessionId = Date.now().toString();
       const response = await uploadFile(sessionId, file);
       const nameWithoutExtension = file.name.replace(/\.[^/.]+$/, "");
-      
+
       let combinedContent = response.content;
       if (response.follow_up_question) {
         combinedContent += `\n\n${response.follow_up_question}`;
@@ -83,7 +83,7 @@ const Index = () => {
     <div className="min-h-screen bg-gradient-background flex items-center justify-center p-8">
       {/* MODIFIED: Wider container and more vertical spacing */}
       <div className="w-full max-w-4xl mx-auto text-center space-y-12">
-        
+
         {/* MODIFIED: Header Section with bigger text */}
         <div className="space-y-6">
           <h1 className="text-5xl font-bold text-foreground">
@@ -99,7 +99,7 @@ const Index = () => {
 
         {/* MODIFIED: Action Cards section */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <Card 
+          <Card
             className="bg-gradient-card border-border hover:border-primary/50 transition-all duration-300 cursor-pointer transform hover:scale-105"
             onClick={handleUploadClick}
           >
@@ -116,7 +116,7 @@ const Index = () => {
             </CardContent>
           </Card>
 
-          <Card 
+          <Card
             className="bg-gradient-card border-border hover:border-primary/50 transition-all duration-300 cursor-pointer transform hover:scale-105"
             onClick={handleDirectChat}
           >

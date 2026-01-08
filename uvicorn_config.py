@@ -13,7 +13,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
 
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app",  # Path to the FastAPI app
+        "utils.main:app",  # Path to the FastAPI app
         host=HOST,
         port=PORT,
         reload=RELOAD,

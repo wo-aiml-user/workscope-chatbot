@@ -4,10 +4,8 @@ langchain_community==0.3.27
 langchain_core==0.3.72
 langchain_google_genai==2.1.8
 langgraph==0.6.1
-llama_index==0.12.52
-llama_parse==0.6.52
 pydantic==2.11.7
 python-dotenv==1.1.1
 uvicorn==0.35.0
 python-multipart
-langchain_deepseek
+google-genai

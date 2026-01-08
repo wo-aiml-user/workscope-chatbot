@@ -4,27 +4,46 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Send, Copy, MoreHorizontal, Upload, Folder, MessageCircle, Plus, User, Bot } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { uploadFile, sendInitialInput, sendInput, ApiResponse } from '@/services/api';
+import { uploadFile, sendInitialInput, sendInput, updateDeveloperProfile, ApiResponse } from '@/services/api';
 import { v4 as uuidv4 } from 'uuid';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
 // --- HELPER FUNCTIONS AND COMPONENTS ---
 const processApiResponseData = (response: ApiResponse): string => {
+    let rawContent = response.content;
+
+    // Attempt to extract JSON if it's wrapped in markdown code blocks or has extra text
+    const jsonMatch = rawContent.match(/```json\n([\s\S]*?)\n```/) ||
+        rawContent.match(/```([\s\S]*?)```/) ||
+        [null, rawContent]; // Fallback if no code blocks
+
+    const potentialJson = jsonMatch[1] || rawContent;
+
     let data: any;
     try {
-        data = JSON.parse(response.content);
+        data = JSON.parse(potentialJson.trim());
     } catch (e) {
-        if (response.current_stage === 'features') {
+        // If parsing the extracted string fails, try finding the first { and last }
+        const firstBrace = rawContent.indexOf('{');
+        const lastBrace = rawContent.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+            try {
+                data = JSON.parse(rawContent.substring(firstBrace, lastBrace + 1));
+            } catch (innerError) {
+                console.warn("Failed to parse extracted JSON block:", innerError);
+                data = { summary: rawContent };
+            }
+        } else if (response.current_stage === 'features') {
             data = {
-                features: response.content.split('\n').filter(line => line.trim().startsWith('- ')).map(line => line.substring(2).trim())
+                features: rawContent.split('\n').filter(line => line.trim().startsWith('- ')).map(line => line.substring(2).trim())
             };
         } else {
-            data = { summary: response.content };
+            data = { summary: rawContent };
         }
     }
 
@@ -61,8 +80,66 @@ const TechStack = ({ data }: { data: Record<string, any> }) => {
     return (<div><div className="space-y-2">{Object.entries(data).map(([category, items]) => { if (category === 'follow_up_question' || !Array.isArray(items)) return null; return (<p key={category} className="leading-relaxed"><strong className="font-semibold text-foreground">{formatTitle(category)}:</strong>{' '}<ParsedContent text={(items as string[]).join(', ')} /></p>); })}</div>{data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}</div>);
 };
 
-const FormattedSection = ({ title, content }: { title: string, content: string }) => (<div><h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2><div className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={content} /></div></div>);
+const FormattedSection = ({ title, content, children }: { title: string, content?: string, children?: React.ReactNode }) => (
+    <div>
+        <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
+        {content && <div className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={content} /></div>}
+        {children && <div className="mt-2">{children}</div>}
+    </div>
+);
 
+const DevelopmentEstimation = ({ data }: { data: { headers: string[], rows: string[][], frontend_total: string, backend_total: string, development_total: string } }) => (
+    <div className="my-2">
+        <table className="w-full text-sm">
+            <thead>
+                <tr className="border-b border-border">
+                    {data.headers.map(header => <th key={header} className="p-2 text-left font-semibold">{header}</th>)}
+                </tr>
+            </thead>
+            <tbody>
+                {data.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex} className="border-b border-border/50">
+                        {row.map((cell, cellIndex) => <td key={cellIndex} className="p-2">{cell}</td>)}
+                    </tr>
+                ))}
+                <tr className="border-t-2 border-border font-semibold bg-muted/50">
+                    <td className="p-2">Total</td>
+                    <td className="p-2">{data.frontend_total}</td>
+                    <td className="p-2">{data.backend_total}</td>
+                </tr>
+                <tr className="font-bold bg-primary/10">
+                    <td className="p-2" colSpan={2}>Development Total</td>
+                    <td className="p-2">{data.development_total} hours</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+);
+
+const OtherEstimation = ({ data }: { data: { headers: string[], rows: string[][], total: string } }) => (
+    <div className="my-2">
+        <table className="w-full text-sm">
+            <thead>
+                <tr className="border-b border-border">
+                    {data.headers.map(header => <th key={header} className="p-2 text-left font-semibold">{header}</th>)}
+                </tr>
+            </thead>
+            <tbody>
+                {data.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex} className="border-b border-border/50">
+                        {row.map((cell, cellIndex) => <td key={cellIndex} className="p-2">{cell}</td>)}
+                    </tr>
+                ))}
+                <tr className="font-bold bg-primary/10">
+                    <td className="p-2">Total</td>
+                    <td className="p-2">{data.total} hours</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+);
+
+// Legacy support for old effort_estimation_table format
 const EffortTable = ({ data }: { data: { headers: string[], rows: string[][] } }) => (
     <table className="w-full text-sm my-2">
         <thead>
@@ -83,11 +160,11 @@ const EffortTable = ({ data }: { data: { headers: string[], rows: string[][] } }
 // MODIFIED: This component is now more robust to handle the generic key-value pair structure.
 const FinalAdjustment = ({ data }: { data: { confirmation_message: string; updated_component: any; follow_up_question?: string } }) => {
     const formatTitle = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    
+
     // Extract the key and value from the updated_component object
     const componentKey = Object.keys(data.updated_component)[0];
     const componentValue = data.updated_component[componentKey];
-    
+
     let componentToRender;
 
     if (componentValue && typeof componentValue === 'object' && componentValue !== null && 'headers' in componentValue && 'rows' in componentValue) {
@@ -112,30 +189,108 @@ const FinalAdjustment = ({ data }: { data: { confirmation_message: string; updat
 
 const ScopeOfWork = ({ data }: { data: any }) => {
     const formatTitle = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    const sectionOrder = ['overview', 'user_roles_and_key_features', 'feature_breakdown', 'workflow', 'milestone_plan', 'tech_stack', 'effort_estimation_table', 'deliverables', 'out_of_scope', 'client_responsibilities', 'technical_requirements', 'general_notes'];
+    const sectionOrder = ['overview', 'user_roles_and_key_features', 'feature_breakdown', 'workflow', 'milestone_plan', 'tech_stack', 'development_estimation', 'other_estimation', 'effort_estimation_table', 'deliverables', 'out_of_scope', 'client_responsibilities', 'technical_requirements', 'general_notes'];
     const dataMap = new Map(Object.entries(data));
-    return (<div className="space-y-6 text-left">{sectionOrder.map(key => { if (!dataMap.has(key) || key === 'follow_up_question') return null; const value = dataMap.get(key); const title = formatTitle(key); if (key === 'tech_stack' && typeof value === 'object' && value !== null) { const techStackData = { ...value }; delete techStackData.follow_up_question; return (<div key={key}><h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2><div className="py-2"><TechStack data={techStackData} /></div></div>); } if (key === 'effort_estimation_table' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) { return (<div key={key}><h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2><EffortTable data={value} /></div>); } if (typeof value === 'string' && value.trim() !== '') { return <FormattedSection key={key} title={title} content={value} />; } return null; })} {data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}</div>);
+
+    return (
+        <div className="space-y-6 text-left">
+            {sectionOrder.map(key => {
+                if (!dataMap.has(key) || key === 'follow_up_question') return null;
+                const value = dataMap.get(key);
+                const title = formatTitle(key);
+
+                // Tech Stack
+                if (key === 'tech_stack' && typeof value === 'object' && value !== null) {
+                    const techStackData = { ...value } as any;
+                    delete techStackData.follow_up_question;
+                    return (
+                        <div key={key}>
+                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
+                            <div className="py-2"><TechStack data={techStackData} /></div>
+                        </div>
+                    );
+                }
+
+                // Development Estimation (new format)
+                if (key === 'development_estimation' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
+                    return (
+                        <div key={key}>
+                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">Development Estimation</h2>
+                            <DevelopmentEstimation data={value as any} />
+                        </div>
+                    );
+                }
+
+                // Other Estimation (new format)
+                if (key === 'other_estimation' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
+                    return (
+                        <div key={key}>
+                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">Other Estimation</h2>
+                            <OtherEstimation data={value as any} />
+                        </div>
+                    );
+                }
+
+                // Legacy effort_estimation_table (for backward compatibility)
+                if (key === 'effort_estimation_table' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
+                    return (
+                        <div key={key}>
+                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
+                            <EffortTable data={value as any} />
+                        </div>
+                    );
+                }
+
+                // Text sections
+                if (typeof value === 'string' && value.trim() !== '') {
+                    return <FormattedSection key={key} title={title} content={value} />;
+                }
+
+                return null;
+            })}
+            {data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}
+        </div>
+    );
 };
 
 
 const MessageContent = ({ content }: { content: string }) => {
     try {
         const data = JSON.parse(content);
+
+        // Check for specific UI components first
         if (data.confirmation_message && data.updated_component) return <FinalAdjustment data={data} />;
-        if (data.overview && data.effort_estimation_table) return <ScopeOfWork data={data} />;
+
+        // Scope of Work detection (now more flexible)
+        if (data.overview && (data.feature_breakdown || data.development_estimation || data.effort_estimation_table)) {
+            return <ScopeOfWork data={data} />;
+        }
+
+        // Tech Stack
         if (data.frontend && data.backend) return <TechStack data={data} />;
-        if (data.features) return <FeatureList data={data} />;
-        if (data.summary) return <Summary data={data} />;
-        return <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(data, null, 2)}</pre>;
+
+        // Features
+        if (data.features && Array.isArray(data.features)) return <FeatureList data={data} />;
+
+        // Summary / Overview
+        if (data.summary || data.overview) return <Summary data={{ summary: data.summary || data.overview, follow_up_question: data.follow_up_question }} />;
+
+        // Fallback for objects that don't match known structures
+        return (
+            <div className="bg-muted/30 p-4 rounded-lg border border-border">
+                <pre className="text-xs whitespace-pre-wrap font-mono">{JSON.stringify(data, null, 2)}</pre>
+            </div>
+        );
     } catch (e) {
-        return <p className="whitespace-pre-wrap"><ParsedContent text={content} /></p>;
+        // If not JSON, render as markdown-style text
+        return <p className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={content} /></p>;
     }
 };
 
 
 // --- MAIN CHAT COMPONENT (No other changes needed below) ---
 interface Message { id: string; content: string; sender: 'user' | 'assistant'; timestamp: Date; }
-export interface Session { id: string; name: string; type: 'folder' | 'chat'; fileName?: string; messages: Message[]; }
+export interface Session { id: string; name: string; type: 'folder' | 'chat'; fileName?: string; messages: Message[]; developerProfile?: string; }
 
 const Chat = () => {
     const { sessionId } = useParams();
@@ -145,6 +300,7 @@ const Chat = () => {
     const [sessions, setSessions] = useState<Session[]>([]);
     const [currentSession, setCurrentSession] = useState<Session | null>(null);
     const [isLoading, setIsLoading] = useState(false);
+    const [developerProfile, setDeveloperProfile] = useState('');
     const fileInputRef = useRef<HTMLInputElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -157,8 +313,10 @@ const Chat = () => {
             if (sessionId) {
                 const session = parsedSessions.find((s) => s.id === sessionId);
                 setCurrentSession(session || null);
+                setDeveloperProfile(session?.developerProfile || '');
             } else {
                 setCurrentSession(null);
+                setDeveloperProfile('');
             }
         }
     }, [sessionId]);
@@ -199,7 +357,7 @@ const Chat = () => {
 
         try {
             const newSessionId = uuidv4();
-            const response = await uploadFile(newSessionId, file);
+            const response = await uploadFile(newSessionId, file, developerProfile);
             const assistantMessageContent = processApiResponseData(response);
             const nameWithoutExtension = file.name.replace(/\.[^/.]+$/, "");
             const newSession: Session = {
@@ -207,6 +365,7 @@ const Chat = () => {
                 name: nameWithoutExtension,
                 type: 'folder',
                 fileName: file.name,
+                developerProfile: developerProfile,
                 messages: [{
                     id: uuidv4(),
                     content: assistantMessageContent,
@@ -226,10 +385,38 @@ const Chat = () => {
 
     const handleNewChat = () => {
         const newSessionId = uuidv4();
-        const newSession: Session = { id: newSessionId, name: "New Chat", type: 'chat', messages: [] };
+        const newSession: Session = { id: newSessionId, name: "New Chat", type: 'chat', developerProfile: developerProfile, messages: [] };
         const updatedSessions = [...sessions, newSession];
         updateAndSaveSessions(updatedSessions);
         navigate(`/chat/${newSessionId}`);
+    }
+
+    const handleDeveloperProfileChange = async (value: string) => {
+        setDeveloperProfile(value);
+        if (currentSession) {
+            const updatedSession = { ...currentSession, developerProfile: value };
+            const updatedSessions = sessions.map(s => s.id === currentSession.id ? updatedSession : s);
+            setCurrentSession(updatedSession);
+            updateAndSaveSessions(updatedSessions);
+        }
+    }
+
+    const saveDeveloperProfile = async () => {
+        if (!currentSession || !developerProfile.trim()) return;
+
+        try {
+            await updateDeveloperProfile(currentSession.id, developerProfile);
+            toast({
+                title: "Profile Updated",
+                description: "Developer profile has been saved and sent to the backend.",
+            });
+        } catch (error) {
+            toast({
+                title: "Update Failed",
+                description: "Failed to update profile on the server.",
+                variant: "destructive"
+            });
+        }
     }
 
     const handleSendMessage = async () => {
@@ -250,7 +437,7 @@ const Chat = () => {
         setIsLoading(true);
 
         try {
-            const response = isInitialMessageInChat ? await sendInitialInput(currentSession.id, userMessageContent) : await sendInput(currentSession.id, userMessageContent);
+            const response = isInitialMessageInChat ? await sendInitialInput(currentSession.id, userMessageContent, developerProfile) : await sendInput(currentSession.id, userMessageContent);
             if (response) {
                 const assistantMessageContent = processApiResponseData(response);
                 const assistantMessage: Message = {
@@ -278,7 +465,7 @@ const Chat = () => {
             handleSendMessage();
         }
     };
-    
+
     const handleCopyMessage = (messageId: string) => {
         const element = document.getElementById(`message-content-${messageId}`);
         if (!element) {
@@ -288,7 +475,7 @@ const Chat = () => {
 
         const textarea = document.createElement('textarea');
         textarea.value = element.innerText;
-        
+
         textarea.style.position = 'fixed';
         textarea.style.top = '-9999px';
         textarea.style.left = '-9999px';
@@ -331,11 +518,40 @@ const Chat = () => {
             <div className="flex-1 flex flex-col">
                 {currentSession ? (
                     <>
-                        {/* Chat Header */}
+                        {/* Chat Header with Developer Profile */}
                         <div className="p-6 border-b border-border bg-card">
-                            <h1 className="text-xl font-semibold text-foreground">{currentSession.name}</h1>
+                            <div className="flex items-center justify-between mb-4">
+                                <h1 className="text-xl font-semibold text-foreground">{currentSession.name}</h1>
+                                {currentSession.developerProfile && (
+                                    <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded-full font-medium">
+                                        Profile Active
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <label className="text-sm font-medium text-foreground whitespace-nowrap">Developer Profile:</label>
+                                <div className="relative flex-1 flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={developerProfile}
+                                        onChange={(e) => handleDeveloperProfileChange(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && saveDeveloperProfile()}
+                                        placeholder="e.g., Senior Developer, 5 years experience with React"
+                                        className="flex-1 px-3 py-2 text-sm rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                                    />
+                                    <Button
+                                        onClick={saveDeveloperProfile}
+                                        variant="outline"
+                                        size="sm"
+                                        className="whitespace-nowrap"
+                                    >
+                                        Save Profile
+                                    </Button>
+                                </div>
+                            </div>
+                            <p className="text-xs text-muted-foreground mt-2">Enter your role and experience level then click Save. The LLM will adjust hour estimates based on this profile.</p>
                         </div>
-                        
+
                         {/* Scrollable Chat History */}
                         <div className="flex-1 overflow-y-auto p-6 space-y-6">
                             {currentSession.messages.map((msg) => (
@@ -357,7 +573,7 @@ const Chat = () => {
                             {isLoading && (<div className="flex items-start gap-4 justify-start"><div className="flex-shrink-0 w-8 h-8 rounded-full bg-sidebar-accent flex items-center justify-center"><Bot className="w-5 h-5 text-primary" /></div><div className="max-w-4xl p-4 rounded-lg border bg-card flex items-center justify-center space-x-1.5"><span className="dot dot-1"></span><span className="dot dot-2"></span><span className="dot dot-3"></span></div></div>)}
                             <div ref={messagesEndRef} />
                         </div>
-                        
+
                         {/* Centered Chat Input Area */}
                         <div className="px-6 pb-6 pt-2">
                             <div className="relative w-full max-w-4xl mx-auto">
