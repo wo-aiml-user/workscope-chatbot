@@ -1,74 +1,35 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export interface ApiResponse {
-  content: string;
+  content: unknown;
   current_stage: string;
   follow_up_question?: string;
 }
 
-// POST /sessions/{session_id}/upload
-export const uploadFile = async (sessionId: string, file: File, developerProfile: string = ""): Promise<ApiResponse> => {
+// Single Unified Chat Endpoint
+export const sendMessage = async (
+  sessionId: string,
+  message: string,
+  history: { role: string; content: string }[] = [],
+  file?: File,
+  developerProfile?: string
+): Promise<ApiResponse> => {
   const formData = new FormData();
-  formData.append("file", file);
-  formData.append("developer_profile", developerProfile);
+  formData.append("session_id", sessionId);
+  formData.append("user_input", message);
+  formData.append("history", JSON.stringify(history));
 
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/upload`, {
+  if (developerProfile) {
+    formData.append("developer_profile", developerProfile);
+  }
+
+  if (file) {
+    formData.append("file", file);
+  }
+
+  const response = await fetch(`${API_BASE_URL}/chat`, {
     method: "POST",
     body: formData,
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({
-      detail: `Upload failed with status: ${response.status}`,
-    }));
-    throw new Error(error.detail);
-  }
-
-  return await response.json();
-};
-
-// POST /sessions/{session_id}/initial-input
-export const sendInitialInput = async (sessionId: string, input: string, developerProfile: string = ""): Promise<ApiResponse> => {
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/initial-input`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initial_input: input, developer_profile: developerProfile }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({
-      detail: `Request failed with status: ${response.status}`,
-    }));
-    throw new Error(error.detail);
-  }
-
-  return await response.json();
-};
-
-// POST /sessions/{session_id}/input
-export const sendInput = async (sessionId: string, input: string): Promise<ApiResponse> => {
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/input`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_input: input }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({
-      detail: `Request failed with status: ${response.status}`,
-    }));
-    throw new Error(error.detail);
-  }
-
-  return await response.json();
-};
-
-// POST /sessions/{session_id}/developer-profile
-export const updateDeveloperProfile = async (sessionId: string, developerProfile: string): Promise<{ status: string; message: string }> => {
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/developer-profile`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ developer_profile: developerProfile }),
   });
 
   if (!response.ok) {
@@ -84,7 +45,7 @@ export const updateDeveloperProfile = async (sessionId: string, developerProfile
 // GET /
 export const checkHealth = async (): Promise<boolean> => {
   try {
-    const response = await fetch(`${API_BASE_URL}/`);
+    const response = await fetch(`${API_BASE_URL}/health`);
     return response.ok;
   } catch (error) {
     console.error("Health check failed:", error);

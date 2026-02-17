@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
 import { Upload, MessageCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { uploadFile } from '@/services/api';
+import { sendMessage } from '@/services/api';
 import { Session } from './Chat';
 
 const Index = () => {
@@ -44,7 +44,7 @@ const Index = () => {
 
     try {
       const sessionId = Date.now().toString();
-      const response = await uploadFile(sessionId, file);
+      const response = await sendMessage(sessionId, "", [], file);
       const nameWithoutExtension = file.name.replace(/\.[^/.]+$/, "");
 
       let combinedContent = response.content;

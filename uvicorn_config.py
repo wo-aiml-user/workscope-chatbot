@@ -8,15 +8,14 @@ load_dotenv()
 # Configuration settings
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
-RELOAD = os.getenv("RELOAD", "true").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
 
 if __name__ == "__main__":
     uvicorn.run(
-        "utils.main:app",  # Path to the FastAPI app
+        "src.main:app",  # Path to the FastAPI app
         host=HOST,
         port=PORT,
-        reload=RELOAD,
+        reload=True,
         log_level=LOG_LEVEL,
         factory=False,
         # Optional: Configure access log

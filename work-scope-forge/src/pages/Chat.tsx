@@ -4,8 +4,10 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Send, Copy, MoreHorizontal, Upload, Folder, MessageCircle, Plus, User, Bot } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { uploadFile, sendInitialInput, sendInput, updateDeveloperProfile, ApiResponse } from '@/services/api';
+import { sendMessage, ApiResponse } from '@/services/api';
 import { v4 as uuidv4 } from 'uuid';
+import MessageContent from '@/components/MessageContent';
+import { normalizeApiResponse, assistantPayloadToDisplayText } from '@/lib/responseNormalizer';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -15,284 +17,10 @@ import {
 
 // --- HELPER FUNCTIONS AND COMPONENTS ---
 const processApiResponseData = (response: ApiResponse): string => {
-    let rawContent = response.content;
-
-    // Attempt to extract JSON if it's wrapped in markdown code blocks or has extra text
-    const jsonMatch = rawContent.match(/```json\n([\s\S]*?)\n```/) ||
-        rawContent.match(/```([\s\S]*?)```/) ||
-        [null, rawContent]; // Fallback if no code blocks
-
-    const potentialJson = jsonMatch[1] || rawContent;
-
-    let data: any;
-    try {
-        data = JSON.parse(potentialJson.trim());
-    } catch (e) {
-        // If parsing the extracted string fails, try finding the first { and last }
-        const firstBrace = rawContent.indexOf('{');
-        const lastBrace = rawContent.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-            try {
-                data = JSON.parse(rawContent.substring(firstBrace, lastBrace + 1));
-            } catch (innerError) {
-                console.warn("Failed to parse extracted JSON block:", innerError);
-                data = { summary: rawContent };
-            }
-        } else if (response.current_stage === 'features') {
-            data = {
-                features: rawContent.split('\n').filter(line => line.trim().startsWith('- ')).map(line => line.substring(2).trim())
-            };
-        } else {
-            data = { summary: rawContent };
-        }
-    }
-
-    if (response.follow_up_question) {
-        let cleanQuestion = response.follow_up_question;
-        if (cleanQuestion.startsWith('[') && cleanQuestion.endsWith(']')) {
-            try {
-                const parsedArray = JSON.parse(cleanQuestion);
-                if (Array.isArray(parsedArray) && parsedArray.length > 0) {
-                    cleanQuestion = parsedArray.join(' ');
-                }
-            } catch (parseError) {
-                console.warn("Could not parse follow-up question as an array:", cleanQuestion);
-            }
-        }
-        if (!data.follow_up_question) {
-            data.follow_up_question = cleanQuestion;
-        }
-    }
-    return JSON.stringify(data);
-};
-
-const ParsedContent = ({ text }: { text: string }) => {
-    const parts = text.split(/(\*\*.*?\*\*)/g);
-    return (<>{parts.map((part, i) => part.startsWith('**') && part.endsWith('**') ? (<strong key={i}>{part.slice(2, -2)}</strong>) : (part))}</>);
-};
-
-const FollowUpQuestion = ({ question }: { question: string }) => (<div className="mt-4"><p className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={question} /></p></div>);
-const Summary = ({ data }: { data: { summary: string, follow_up_question?: string } }) => (<div><p className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={data.summary} /></p>{data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}</div>);
-const FeatureList = ({ data }: { data: { features: string[], follow_up_question?: string } }) => (<div><ul className="list-disc list-inside space-y-2">{data.features.map((item, index) => <li key={index}><ParsedContent text={item} /></li>)}</ul>{data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}</div>);
-
-const TechStack = ({ data }: { data: Record<string, any> }) => {
-    const formatTitle = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    return (<div><div className="space-y-2">{Object.entries(data).map(([category, items]) => { if (category === 'follow_up_question' || !Array.isArray(items)) return null; return (<p key={category} className="leading-relaxed"><strong className="font-semibold text-foreground">{formatTitle(category)}:</strong>{' '}<ParsedContent text={(items as string[]).join(', ')} /></p>); })}</div>{data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}</div>);
-};
-
-const FormattedSection = ({ title, content, children }: { title: string, content?: string, children?: React.ReactNode }) => (
-    <div>
-        <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
-        {content && <div className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={content} /></div>}
-        {children && <div className="mt-2">{children}</div>}
-    </div>
-);
-
-const DevelopmentEstimation = ({ data }: { data: { headers: string[], rows: string[][], frontend_total: string, backend_total: string, development_total: string } }) => (
-    <div className="my-2">
-        <table className="w-full text-sm">
-            <thead>
-                <tr className="border-b border-border">
-                    {data.headers.map(header => <th key={header} className="p-2 text-left font-semibold">{header}</th>)}
-                </tr>
-            </thead>
-            <tbody>
-                {data.rows.map((row, rowIndex) => (
-                    <tr key={rowIndex} className="border-b border-border/50">
-                        {row.map((cell, cellIndex) => <td key={cellIndex} className="p-2">{cell}</td>)}
-                    </tr>
-                ))}
-                <tr className="border-t-2 border-border font-semibold bg-muted/50">
-                    <td className="p-2">Total</td>
-                    <td className="p-2">{data.frontend_total}</td>
-                    <td className="p-2">{data.backend_total}</td>
-                </tr>
-                <tr className="font-bold bg-primary/10">
-                    <td className="p-2" colSpan={2}>Development Total</td>
-                    <td className="p-2">{data.development_total} hours</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-);
-
-const OtherEstimation = ({ data }: { data: { headers: string[], rows: string[][], total: string } }) => (
-    <div className="my-2">
-        <table className="w-full text-sm">
-            <thead>
-                <tr className="border-b border-border">
-                    {data.headers.map(header => <th key={header} className="p-2 text-left font-semibold">{header}</th>)}
-                </tr>
-            </thead>
-            <tbody>
-                {data.rows.map((row, rowIndex) => (
-                    <tr key={rowIndex} className="border-b border-border/50">
-                        {row.map((cell, cellIndex) => <td key={cellIndex} className="p-2">{cell}</td>)}
-                    </tr>
-                ))}
-                <tr className="font-bold bg-primary/10">
-                    <td className="p-2">Total</td>
-                    <td className="p-2">{data.total} hours</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-);
-
-// Legacy support for old effort_estimation_table format
-const EffortTable = ({ data }: { data: { headers: string[], rows: string[][] } }) => (
-    <table className="w-full text-sm my-2">
-        <thead>
-            <tr className="border-b border-border">
-                {data.headers.map(header => <th key={header} className="p-2 text-left font-semibold">{header}</th>)}
-            </tr>
-        </thead>
-        <tbody>
-            {data.rows.map((row, rowIndex) => (
-                <tr key={rowIndex} className="border-b border-border/50">
-                    {row.map((cell, cellIndex) => <td key={cellIndex} className="p-2">{cell}</td>)}
-                </tr>
-            ))}
-        </tbody>
-    </table>
-);
-
-// MODIFIED: This component is now more robust to handle the generic key-value pair structure.
-const FinalAdjustment = ({ data }: { data: { confirmation_message: string; updated_component: any; follow_up_question?: string } }) => {
-    const formatTitle = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-
-    // Extract the key and value from the updated_component object
-    const componentKey = Object.keys(data.updated_component)[0];
-    const componentValue = data.updated_component[componentKey];
-
-    let componentToRender;
-
-    if (componentValue && typeof componentValue === 'object' && componentValue !== null && 'headers' in componentValue && 'rows' in componentValue) {
-        // It's the effort estimation table
-        componentToRender = <FormattedSection title={formatTitle(componentKey)} content=""><EffortTable data={componentValue} /></FormattedSection>;
-    } else if (typeof componentValue === 'string') {
-        // It's a simple text component (like workflow, overview, etc.)
-        componentToRender = <FormattedSection title={formatTitle(componentKey)} content={componentValue} />;
-    } else {
-        // Fallback for any other type of component
-        componentToRender = <div><h2 className="text-lg font-bold text-foreground mb-2">{formatTitle(componentKey)}</h2><pre className="text-xs whitespace-pre-wrap">{JSON.stringify(componentValue, null, 2)}</pre></div>;
-    }
-
-    return (
-        <div>
-            <p className="whitespace-pre-wrap leading-relaxed mb-4"><ParsedContent text={data.confirmation_message} /></p>
-            {componentToRender}
-            {data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}
-        </div>
-    );
-};
-
-const ScopeOfWork = ({ data }: { data: any }) => {
-    const formatTitle = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    const sectionOrder = ['overview', 'user_roles_and_key_features', 'feature_breakdown', 'workflow', 'milestone_plan', 'tech_stack', 'development_estimation', 'other_estimation', 'effort_estimation_table', 'deliverables', 'out_of_scope', 'client_responsibilities', 'technical_requirements', 'general_notes'];
-    const dataMap = new Map(Object.entries(data));
-
-    return (
-        <div className="space-y-6 text-left">
-            {sectionOrder.map(key => {
-                if (!dataMap.has(key) || key === 'follow_up_question') return null;
-                const value = dataMap.get(key);
-                const title = formatTitle(key);
-
-                // Tech Stack
-                if (key === 'tech_stack' && typeof value === 'object' && value !== null) {
-                    const techStackData = { ...value } as any;
-                    delete techStackData.follow_up_question;
-                    return (
-                        <div key={key}>
-                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
-                            <div className="py-2"><TechStack data={techStackData} /></div>
-                        </div>
-                    );
-                }
-
-                // Development Estimation (new format)
-                if (key === 'development_estimation' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
-                    return (
-                        <div key={key}>
-                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">Development Estimation</h2>
-                            <DevelopmentEstimation data={value as any} />
-                        </div>
-                    );
-                }
-
-                // Other Estimation (new format)
-                if (key === 'other_estimation' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
-                    return (
-                        <div key={key}>
-                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">Other Estimation</h2>
-                            <OtherEstimation data={value as any} />
-                        </div>
-                    );
-                }
-
-                // Legacy effort_estimation_table (for backward compatibility)
-                if (key === 'effort_estimation_table' && typeof value === 'object' && value !== null && 'headers' in value && 'rows' in value) {
-                    return (
-                        <div key={key}>
-                            <h2 className="text-lg font-bold text-foreground mb-2 border-b border-border pb-1">{title}</h2>
-                            <EffortTable data={value as any} />
-                        </div>
-                    );
-                }
-
-                // Text sections
-                if (typeof value === 'string' && value.trim() !== '') {
-                    return <FormattedSection key={key} title={title} content={value} />;
-                }
-
-                return null;
-            })}
-            {data.follow_up_question && <FollowUpQuestion question={data.follow_up_question} />}
-        </div>
-    );
+    return JSON.stringify(normalizeApiResponse(response));
 };
 
 
-const MessageContent = ({ content }: { content: string }) => {
-    try {
-        const data = JSON.parse(content);
-
-        // Check for specific UI components first
-        if (data.confirmation_message && data.updated_component) return <FinalAdjustment data={data} />;
-
-        // Scope of Work detection (now more flexible)
-        if (data.overview && (data.feature_breakdown || data.development_estimation || data.effort_estimation_table || data.milestone_plan)) {
-            return <ScopeOfWork data={data} />;
-        }
-
-        // Features
-        if (data.features && Array.isArray(data.features)) return <FeatureList data={data} />;
-
-        // Summary / Overview (simple text response)
-        if (data.summary || (data.overview && !data.feature_breakdown && !data.milestone_plan)) {
-            return <Summary data={{ summary: data.summary || data.overview, follow_up_question: data.follow_up_question }} />;
-        }
-
-        // Dynamic Tech Stack Detection:
-        // A tech stack is an object where most keys (excluding follow_up_question) have array values.
-        const keys = Object.keys(data).filter(k => k !== 'follow_up_question');
-        const arrayValueCount = keys.filter(k => Array.isArray(data[k])).length;
-        if (keys.length > 0 && arrayValueCount / keys.length >= 0.5) {
-            return <TechStack data={data} />;
-        }
-
-        // Fallback for objects that don't match known structures
-        return (
-            <div className="bg-muted/30 p-4 rounded-lg border border-border">
-                <pre className="text-xs whitespace-pre-wrap font-mono">{JSON.stringify(data, null, 2)}</pre>
-            </div>
-        );
-    } catch (e) {
-        // If not JSON, render as markdown-style text
-        return <p className="whitespace-pre-wrap leading-relaxed"><ParsedContent text={content} /></p>;
-    }
-};
 
 
 // --- MAIN CHAT COMPONENT (No other changes needed below) ---
@@ -315,7 +43,7 @@ const Chat = () => {
     useEffect(() => {
         const savedSessions = localStorage.getItem('work-scope-sessions');
         if (savedSessions) {
-            const parsedSessions: Session[] = JSON.parse(savedSessions).map((s: any) => ({ ...s, messages: s.messages.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })) }));
+            const parsedSessions: Session[] = JSON.parse(savedSessions).map((s: Session) => ({ ...s, messages: s.messages.map((m: Message) => ({ ...m, timestamp: new Date(m.timestamp) })) }));
             setSessions(parsedSessions);
             if (sessionId) {
                 const session = parsedSessions.find((s) => s.id === sessionId);
@@ -364,7 +92,7 @@ const Chat = () => {
 
         try {
             const newSessionId = uuidv4();
-            const response = await uploadFile(newSessionId, file, developerProfile);
+            const response = await sendMessage(newSessionId, "", [], file, developerProfile);
             const assistantMessageContent = processApiResponseData(response);
             const nameWithoutExtension = file.name.replace(/\.[^/.]+$/, "");
             const newSession: Session = {
@@ -411,19 +139,13 @@ const Chat = () => {
     const saveDeveloperProfile = async () => {
         if (!currentSession || !developerProfile.trim()) return;
 
-        try {
-            await updateDeveloperProfile(currentSession.id, developerProfile);
-            toast({
-                title: "Profile Updated",
-                description: "Developer profile has been saved and sent to the backend.",
-            });
-        } catch (error) {
-            toast({
-                title: "Update Failed",
-                description: "Failed to update profile on the server.",
-                variant: "destructive"
-            });
-        }
+        // Just update local state. The backend gets the profile with every message now.
+        // We can optionally send a message to confirm, but usually just storing it is enough.
+        // For UX, we'll pretend it saved.
+        toast({
+            title: "Profile Updated",
+            description: "Developer profile will be used in next message.",
+        });
     }
 
     const handleSendMessage = async () => {
@@ -444,7 +166,18 @@ const Chat = () => {
         setIsLoading(true);
 
         try {
-            const response = isInitialMessageInChat ? await sendInitialInput(currentSession.id, userMessageContent, developerProfile) : await sendInput(currentSession.id, userMessageContent);
+            // Prepare history
+            // Converting frontend messages to the format expected by backend:
+            // [{"role": "user"|"model", "content": "..."}]
+            // Note: backend expects 'role' as 'user' or 'model'. Frontend has 'user' or 'assistant'.
+            const history = currentSession.messages.map(m => ({
+                role: m.sender === 'assistant' ? 'model' : 'user',
+                content: m.sender === 'assistant' ? assistantPayloadToDisplayText(m.content) : m.content
+            }));
+
+            // Unified call
+            const response = await sendMessage(currentSession.id, userMessageContent, history, undefined, developerProfile);
+
             if (response) {
                 const assistantMessageContent = processApiResponseData(response);
                 const assistantMessage: Message = {
